@@ -1,0 +1,155 @@
+name: build and deploy image to ECR
+
+on:
+  workflow_dispatch:
+    inputs:
+      Env:
+        type: choice
+        description: 'choose Enviornment' 
+        options: 
+        - dev
+        - stg
+        - prod
+        required: true
+      tag1:
+        description: 'Tag1  for image' 
+        required: true
+      tag2:
+        description: 'Tag2 for image' 
+        required: true
+      namespace:
+       description: 'namespace'
+env:
+  CI: false
+  TAG1: ${{ github.event.inputs.tag1 }}
+  TAG2: ${{ github.event.inputs.tag2 }}
+  NAMESPACE: ${{ github.event.inputs.namespace }}
+jobs:
+  
+  build:
+    
+    name: Build Image
+    runs-on: ubuntu-latest
+    if:  ${{ github.event.inputs.Env == 'prod' }}
+   
+    steps:
+  
+    - name: Check out code
+      uses: actions/checkout@v2
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+        aws-region: us-east-1
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+      
+    - name: print inputs parameters
+      run: |
+         echo "${{ toJSON(github.event.inputs) }}"
+         echo "$(echo ${GITHUB_REF#refs/heads/})"
+
+    - name: Install eksctl and aws cli
+      run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          kubectl version --client
+          sudo apt-get install awscli
+          aws --version
+          aws eks update-kubeconfig --name cloudifytests --region us-east-1
+
+    
+    - uses: actions/checkout@v3
+    - name: Setup Node 16.x
+      uses: actions/setup-node@v3
+      with:
+       node-version: 16.x
+       cache: npm    
+    
+    - name: Build, tag, and push image to Amazon ECR
+      env:
+         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+         ECR_REPOSITORY: cloudifytests_fe
+         
+      run: |   
+      
+         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$TAG1 -t $ECR_REGISTRY/$ECR_REPOSITORY:$TAG2 --build-arg BASE_URL=https://cloudifytests.io/ --build-arg BACKEND_URL=sessionbe --build-arg ENV=prod --build-arg DELETE_POD_URL=https://cloudifytests.io --build-arg SOCKET_URL=wss://cloudifytests.io --build-arg COGNITO_LOGIN_URL="https://cloudifytests.auth.us-east-1.amazoncognito.com/login?client_id=45uko9jm1f6fbnakaqnedsp3i9&response_type=code&scope=profile+aws.cognito.signin.user.admin+openid+email+phone&redirect_uri=https://cloudifytests.io/auth" --build-arg AUTH_URL=https://auth.cloudifytests.io --build-arg SUBSCRIPTION_URL=https://sub.cloudifytests.io --build-arg DOMAIN=cloudifytests.io .
+         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$TAG1
+         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$TAG2
+         
+  stg-build:
+    
+    name: stg Build Image
+    runs-on: ubuntu-latest
+    if:  ${{ (github.event.inputs.Env == 'stg'  ||    github.event.inputs.Env == 'dev') }}
+   
+    steps:
+
+    - name: Check out code
+      uses: actions/checkout@v2
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-south-1
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+      
+    - name: print inputs parameters
+      run: |
+         echo "${{ toJSON(github.event.inputs) }}"
+         echo "$(echo ${GITHUB_REF#refs/heads/})"
+
+    - name: Install eksctl and aws cli
+      run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          kubectl version --client
+          sudo apt-get install awscli
+          aws --version
+          aws eks update-kubeconfig --name stg-cloudifytests --region ap-south-1
+
+    - name: patch deployment
+      run: |
+       kubectl patch deployment cloudbrowser-selenoid-ui -p '{"spec":{"template":{"spec":{"containers":[{"name":"selenoid-ui","image":"384089902725.dkr.ecr.ap-south-1.amazonaws.com/cloudifytests_fe:'${TAG1}'"}]}}}}' -n $NAMESPACE
+       
+    - uses: actions/checkout@v3
+    - name: Setup Node 16.x
+      uses: actions/setup-node@v3
+      with:
+       node-version: 16.x
+       cache: npm    
+    
+    - name: Build, tag, and push image to Amazon ECR
+      env:
+         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+         ECR_REPOSITORY: cloudifytests_fe
+         
+         
+      if:  ${{ github.event.inputs.Env == 'stg' }}
+      run: |   
+      
+         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$TAG1 -t $ECR_REGISTRY/$ECR_REPOSITORY:$TAG2 --build-arg BASE_URL=https://stg.cloudifytests.io/ --build-arg BACKEND_URL=selenoidbe --build-arg ENV=stg --build-arg DELETE_POD_URL=https://stg.cloudifytests.io --build-arg SOCKET_URL=wss://stg.cloudifytests.io --build-arg COGNITO_LOGIN_URL="https://stage-cloudifytests.auth.ap-south-1.amazoncognito.com/login?client_id=5s5aovc7epna18uoi47dkahnc1&response_type=code&scope=profile+aws.cognito.signin.user.admin+openid+email+phone&redirect_uri=https://stg.cloudifytests.io/auth" --build-arg AUTH_URL=https://stg-auth.cloudifytests.io --build-arg SUBSCRIPTION_URL=https://stg-sub.cloudifytests.io --build-arg DOMAIN=cloudifytests.io .
+         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$TAG1
+         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$TAG2
+         
+    - name: Build, tag, and push image to Amazon ECR
+      env:
+         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+         ECR_REPOSITORY: cloudifytests_fe
+      if:  ${{ github.event.inputs.Env == 'dev' }}
+      run: |   
+     
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$TAG1 -t $ECR_REGISTRY/$ECR_REPOSITORY:$TAG2 --build-arg BASE_URL=https://dev.cloudifytests.io/ --build-arg BACKEND_URL=selenoidbe --build-arg ENV=dev --build-arg DELETE_POD_URL=https://dev.cloudifytests.io --build-arg SOCKET_URL=wss://dev.cloudifytests.io --build-arg COGNITO_LOGIN_URL="https://stage-cloudifytests.auth.ap-south-1.amazoncognito.com/login?client_id=5s5aovc7epna18uoi47dkahnc1&response_type=code&scope=profile+aws.cognito.signin.user.admin+openid+email+phone&redirect_uri=https://dev.cloudifytests.io/auth" --build-arg AUTH_URL=https://dev-auth.cloudifytests.io --build-arg SUBSCRIPTION_URL=https://dev-sub.cloudifytests.io --build-arg DOMAIN=cloudifytests.io .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$TAG1
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$TAG2
+    
+      
